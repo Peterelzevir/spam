@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 import json
 import random
@@ -30,6 +33,20 @@ DEFAULT_CONFIG = {
     'admin_id': None  # Will be set on first run
 }
 
+# Config management functions
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    return DEFAULT_CONFIG.copy()
+
+def save_config(config):
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=4)
+
+# Load config at startup
+config = load_config()
+
 # Get API credentials on startup
 def get_credentials():
     print("=" * 50)
@@ -50,19 +67,6 @@ SESSION_NAME = 'userbot_session'
 # Initialize client
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
-# Config management functions
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return DEFAULT_CONFIG.copy()
-
-def save_config(config):
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=4)
-
-config = load_config()
-
 # Helper function to check if user is admin
 async def is_admin(user_id):
     # If admin_id is not set, set it to the first user who interacts with the bot
@@ -72,6 +76,102 @@ async def is_admin(user_id):
         await client.send_message(user_id, f"🔐 Anda telah ditetapkan sebagai admin bot dengan ID: {user_id}")
         return True
     return user_id == config['admin_id']
+
+# Main functionality to copy messages
+async def copy_messages(owner_id):
+    while config['active']:
+        try:
+            if not config['groups'] or not config['target']:
+                await client.send_message(owner_id, "⚠️ Missing configuration, stopping bot")
+                config['active'] = False
+                save_config(config)
+                break
+            
+            # Select random source group
+            source_group = random.choice(config['groups'])
+            
+            # Get last 30 messages from the source group
+            messages = await client(GetHistoryRequest(
+                peer=source_group['id'],
+                limit=30,
+                offset_date=None,
+                offset_id=0,
+                max_id=0,
+                min_id=0,
+                add_offset=0,
+                hash=0
+            ))
+            
+            if not messages.messages:
+                await client.send_message(owner_id, f"⚠️ No messages found in {source_group['name']}")
+                continue
+            
+            # Filter messages with media and caption first
+            media_with_caption = [msg for msg in messages.messages 
+                               if msg.media and hasattr(msg, 'message') and msg.message]
+            
+            # If there are messages with media and caption, prioritize them
+            if media_with_caption:
+                message = random.choice(media_with_caption)
+                message_type = "Media with caption"
+            else:
+                # Otherwise, just pick any message with media
+                media_messages = [msg for msg in messages.messages if msg.media]
+                if media_messages:
+                    message = random.choice(media_messages)
+                    message_type = "Media only"
+                else:
+                    # If no media found, pick any random message
+                    message = random.choice(messages.messages)
+                    message_type = "Text only"
+            
+            # Copy to target
+            target_group = config['target']['id']
+            sent_message = await client.send_message(target_group, message)
+            
+            if sent_message:
+                config['cycle_count'] += 1
+                save_config(config)
+                
+                # Format the timestamp
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                
+                # Prepare info about the original message
+                message_info = ""
+                if hasattr(message, 'message') and message.message:
+                    # Truncate message preview if too long
+                    preview = message.message[:50] + "..." if len(message.message) > 50 else message.message
+                    message_info = f"Content: \"{preview}\"\n"
+                
+                # Send status update to owner using quote formatting
+                status_message = (
+                    f"✅ **Cycle #{config['cycle_count']} completed at {timestamp}**\n\n"
+                    f"Source: {source_group['name']}\n"
+                    f"Target: {config['target']['name']}\n"
+                    f"Type: {message_type}\n"
+                    f"{message_info}"
+                    f"Next copy in {config['delay']} seconds"
+                )
+                await client.send_message(owner_id, status_message)
+            
+            # Wait for the specified delay
+            await asyncio.sleep(config['delay'])
+            
+        except FloodWaitError as e:
+            # Handle Telegram rate limits
+            wait_time = e.seconds
+            await client.send_message(
+                owner_id, 
+                f"⚠️ Hit rate limit, waiting for {wait_time} seconds"
+            )
+            await asyncio.sleep(wait_time)
+        except Exception as e:
+            logger.error(f"Error during message copying: {e}")
+            await client.send_message(
+                owner_id, 
+                f"❌ Error during copy: {str(e)}\nRetrying in {config['delay']} seconds"
+            )
+            await asyncio.sleep(config['delay'])
 
 # Command handling
 @client.on(events.NewMessage(pattern=r'\.join (.+)'))
@@ -463,74 +563,77 @@ async def invite_contacts(event):
                     await status_msg.edit(f"❌ Error getting group info: {str(e)}")
                     return
         
-        # Get all contacts
-        contacts = await client(GetContactsRequest(hash=0))
-        if not contacts.contacts:
-            await status_msg.edit("⚠️ No contacts found in your Telegram account")
-            return
+            # Get all contacts
+            contacts = await client(GetContactsRequest(hash=0))
+            if not contacts.contacts:
+                await status_msg.edit("⚠️ No contacts found in your Telegram account")
+                return
+            
+            await status_msg.edit(f"🔄 Found {len(contacts.contacts)} contacts. Checking for mutual contacts...")
+            
+            # Get mutual contacts (those who have you in their contacts)
+            mutual_contacts = []
+            for contact in contacts.contacts:
+                try:
+                    user = await client.get_entity(contact.user_id)
+                    is_mutual = user.mutual_contact
+                    if is_mutual:
+                        mutual_contacts.append(InputPeerUser(user.id, user.access_hash))
+                except Exception as e:
+                    logger.error(f"Error checking contact {contact.user_id}: {e}")
+            
+            if not mutual_contacts:
+                await status_msg.edit("⚠️ No mutual contacts found")
+                return
+            
+            await status_msg.edit(f"🔄 Found {len(mutual_contacts)} mutual contacts. Starting invitation process...")
+            
+            # Invite mutual contacts in smaller batches to avoid flood limits
+            batch_size = 5  # Invite 5 contacts at a time
+            success_count = 0
+            failed_count = 0
+            
+            for i in range(0, len(mutual_contacts), batch_size):
+                batch = mutual_contacts[i:i+batch_size]
+                try:
+                    # Create an InputPeerChannel from the target entity
+                    input_channel = InputPeerChannel(target_entity.id, target_entity.access_hash)
+                    
+                    # Invite the batch of contacts
+                    await client(InviteToChannelRequest(
+                        channel=input_channel,
+                        users=batch
+                    ))
+                    success_count += len(batch)
+                    
+                    # Update status message
+                    await status_msg.edit(f"🔄 Invited {success_count}/{len(mutual_contacts)} contacts... ({failed_count} failed)")
+                    
+                    # Sleep to avoid hitting rate limits
+                    await asyncio.sleep(2)
+                    
+                except UserPrivacyRestrictedError:
+                    failed_count += len(batch)
+                    await status_msg.edit(f"🔄 Some users' privacy settings prevented invitation. Invited {success_count}/{len(mutual_contacts)} contacts... ({failed_count} failed)")
+                except FloodWaitError as e:
+                    await status_msg.edit(f"⚠️ Hit rate limit. Waiting for {e.seconds} seconds...")
+                    await asyncio.sleep(e.seconds)
+                except Exception as e:
+                    failed_count += len(batch)
+                    await status_msg.edit(f"⚠️ Error inviting batch: {str(e)}")
+                    await asyncio.sleep(2)
+            
+            # Final status update
+            await status_msg.edit(f"✅ Invitation process completed!\n\n"
+                                f"• Target Group: {target_entity.title}\n"
+                                f"• Total Contacts: {len(contacts.contacts)}\n"
+                                f"• Mutual Contacts: {len(mutual_contacts)}\n"
+                                f"• Successfully Invited: {success_count}\n"
+                                f"• Failed to Invite: {failed_count}")
         
-        await status_msg.edit(f"🔄 Found {len(contacts.contacts)} contacts. Checking for mutual contacts...")
-        
-        # Get mutual contacts (those who have you in their contacts)
-        mutual_contacts = []
-        for contact in contacts.contacts:
-            try:
-                user = await client.get_entity(contact.user_id)
-                is_mutual = user.mutual_contact
-                if is_mutual:
-                    mutual_contacts.append(InputPeerUser(user.id, user.access_hash))
-            except Exception as e:
-                logger.error(f"Error checking contact {contact.user_id}: {e}")
-        
-        if not mutual_contacts:
-            await status_msg.edit("⚠️ No mutual contacts found")
-            return
-        
-        await status_msg.edit(f"🔄 Found {len(mutual_contacts)} mutual contacts. Starting invitation process...")
-        
-        # Invite mutual contacts in smaller batches to avoid flood limits
-        batch_size = 5  # Invite 5 contacts at a time
-        success_count = 0
-        failed_count = 0
-        
-        for i in range(0, len(mutual_contacts), batch_size):
-            batch = mutual_contacts[i:i+batch_size]
-            try:
-                # Create an InputPeerChannel from the target entity
-                input_channel = InputPeerChannel(target_entity.id, target_entity.access_hash)
-                
-                # Invite the batch of contacts
-                await client(InviteToChannelRequest(
-                    channel=input_channel,
-                    users=batch
-                ))
-                success_count += len(batch)
-                
-                # Update status message
-                await status_msg.edit(f"🔄 Invited {success_count}/{len(mutual_contacts)} contacts... ({failed_count} failed)")
-                
-                # Sleep to avoid hitting rate limits
-                await asyncio.sleep(2)
-                
-            except UserPrivacyRestrictedError:
-                failed_count += len(batch)
-                await status_msg.edit(f"🔄 Some users' privacy settings prevented invitation. Invited {success_count}/{len(mutual_contacts)} contacts... ({failed_count} failed)")
-            except FloodWaitError as e:
-                await status_msg.edit(f"⚠️ Hit rate limit. Waiting for {e.seconds} seconds...")
-                await asyncio.sleep(e.seconds)
-            except Exception as e:
-                failed_count += len(batch)
-                await status_msg.edit(f"⚠️ Error inviting batch: {str(e)}")
-                await asyncio.sleep(2)
-        
-        # Final status update
-        await status_msg.edit(f"✅ Invitation process completed!\n\n"
-                             f"• Target Group: {target_entity.title}\n"
-                             f"• Total Contacts: {len(contacts.contacts)}\n"
-                             f"• Mutual Contacts: {len(mutual_contacts)}\n"
-                             f"• Successfully Invited: {success_count}\n"
-                             f"• Failed to Invite: {failed_count}")
-    
+        except Exception as e:
+            await status_msg.edit(f"❌ Error during group processing: {str(e)}")
+            
     except Exception as e:
         await event.respond(f"❌ Error during invitation process: {str(e)}")
 
@@ -597,109 +700,16 @@ async def get_otp(event):
     except Exception as e:
         await event.respond(f"❌ Error retrieving OTP messages: {str(e)}")
 
-# Main functionality to copy messages
-async def copy_messages(owner_id):
-    while config['active']:
-        try:
-            if not config['groups'] or not config['target']:
-                await client.send_message(owner_id, "⚠️ Missing configuration, stopping bot")
-                config['active'] = False
-                save_config(config)
-                break
-            
-            # Select random source group
-            source_group = random.choice(config['groups'])
-            
-            # Get last 30 messages from the source group (increased from 20 to find more media)
-            messages = await client(GetHistoryRequest(
-                peer=source_group['id'],
-                limit=30,
-                offset_date=None,
-                offset_id=0,
-                max_id=0,
-                min_id=0,
-                add_offset=0,
-                hash=0
-            ))
-            
-            if not messages.messages:
-                await client.send_message(owner_id, f"⚠️ No messages found in {source_group['name']}")
-                continue
-            
-            # Filter messages with media and caption first
-            media_with_caption = [msg for msg in messages.messages 
-                               if msg.media and hasattr(msg, 'message') and msg.message]
-            
-            # If there are messages with media and caption, prioritize them
-            if media_with_caption:
-                message = random.choice(media_with_caption)
-                message_type = "Media with caption"
-            else:
-                # Otherwise, just pick any message with media
-                media_messages = [msg for msg in messages.messages if msg.media]
-                if media_messages:
-                    message = random.choice(media_messages)
-                    message_type = "Media only"
-                else:
-                    # If no media found, pick any random message
-                    message = random.choice(messages.messages)
-                    message_type = "Text only"
-            
-            # Copy to target
-            target_group = config['target']['id']
-            sent_message = await client.send_message(target_group, message)
-            
-            if sent_message:
-                config['cycle_count'] += 1
-                save_config(config)
-                
-                # Format the timestamp
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                
-                # Prepare info about the original message
-                message_info = ""
-                if hasattr(message, 'message') and message.message:
-                    # Truncate message preview if too long
-                    preview = message.message[:50] + "..." if len(message.message) > 50 else message.message
-                    message_info = f"Content: \"{preview}\"\n"
-                
-                # Send status update to owner using quote formatting
-                status_message = (
-                    f"✅ **Cycle #{config['cycle_count']} completed at {timestamp}**\n\n"
-                    f"Source: {source_group['name']}\n"
-                    f"Target: {config['target']['name']}\n"
-                    f"Type: {message_type}\n"
-                    f"{message_info}"
-                    f"Next copy in {config['delay']} seconds"
-                )
-                await client.send_message(owner_id, status_message)
-            
-            # Wait for the specified delay
-            await asyncio.sleep(config['delay'])
-            
-        except FloodWaitError as e:
-            # Handle Telegram rate limits
-            wait_time = e.seconds
-            await client.send_message(
-                owner_id, 
-                f"⚠️ Hit rate limit, waiting for {wait_time} seconds"
-            )
-            await asyncio.sleep(wait_time)
-        except Exception as e:
-            logger.error(f"Error during message copying: {e}")
-            await client.send_message(
-                owner_id, 
-                f"❌ Error during copy: {str(e)}\nRetrying in {config['delay']} seconds"
-            )
-            await asyncio.sleep(config['delay'])
-
 # Main function
 async def main():
     print("\n" + "=" * 50)
     print("\n📱 Starting Telegram Userbot 📱\n")
     print("=" * 50 + "\n")
     
-    await client.start(phone=PHONE_NUMBER)
+    # Connect to Telegram
+    await client.start()
+    
+    # Print login info
     me = await client.get_me()
     logger.info(f"Userbot started as @{me.username}")
     print(f"\n✅ Logged in as: @{me.username}")
@@ -715,12 +725,13 @@ async def main():
         await client.send_message(config['admin_id'], "🔄 Bot restarted and continuing operation")
         asyncio.create_task(copy_messages(config['admin_id']))
     
+    # Run the client until disconnected
     await client.run_until_disconnected()
 
+# Run the main function
 if __name__ == '__main__':
     try:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(main())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n⏹️ Userbot has been stopped manually.")
     except Exception as e:
