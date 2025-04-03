@@ -13,7 +13,7 @@ from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelReque
 from telethon.tl.functions.messages import GetHistoryRequest, GetDialogsRequest, ImportChatInviteRequest
 from telethon.tl.functions.contacts import GetContactsRequest
 from telethon.tl.types import InputPeerEmpty, InputPeerChannel, InputPeerUser
-from telethon.errors import ChatAdminRequiredError, ChannelPrivateError, FloodWaitError, UserPrivacyRestrictedError
+from telethon.errors import ChatAdminRequiredError, ChannelPrivateError, FloodWaitError, UserPrivacyRestrictedError, SessionPasswordNeededError
 
 # Configure logging
 logging.basicConfig(
@@ -64,7 +64,20 @@ def get_credentials():
 API_ID, API_HASH, PHONE_NUMBER = get_credentials()
 SESSION_NAME = 'userbot_session'
 
-# Initialize client
+# ===== AUTENTIKASI TELEGRAM DENGAN KODE VERIFIKASI =====
+# BAGIAN INI PENTING: Menangani kode verifikasi yang dikirim Telegram
+
+# Fungsi untuk meminta kode verifikasi dari user
+def telegram_code_callback():
+    code = input("\n⚠️ MASUKKAN KODE VERIFIKASI dari Telegram: ")
+    return code
+
+# Fungsi untuk meminta password 2FA jika diperlukan
+def telegram_password_callback():
+    password = getpass.getpass("\n⚠️ MASUKKAN PASSWORD 2FA Anda: ")
+    return password
+
+# Initialize client with explicit code callback
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 # Helper function to check if user is admin
@@ -706,8 +719,13 @@ async def main():
     print("\n📱 Starting Telegram Userbot 📱\n")
     print("=" * 50 + "\n")
     
-    # Connect to Telegram
-    await client.start()
+    # BAGIAN INI PENTING: Menggunakan callback khusus untuk autentikasi
+    print("📲 Menghubungkan ke Telegram...")
+    print("⏳ Mohon tunggu, Telegram akan mengirimkan kode verifikasi...")
+    
+    # Metode login yang BENAR dengan callback eksplisit
+    await client.start(phone=PHONE_NUMBER, code_callback=telegram_code_callback, password_callback=telegram_password_callback)
+    print("✅ Login berhasil!")
     
     # Print login info
     me = await client.get_me()
@@ -731,6 +749,7 @@ async def main():
 # Run the main function
 if __name__ == '__main__':
     try:
+        # BAGIAN PENTING: Memastikan event loop tersedia dan menjalankan main()
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n⏹️ Userbot has been stopped manually.")
