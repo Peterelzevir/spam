@@ -171,21 +171,114 @@ async def schedule_next_forward():
         await forward_random_message()
 
 # Command handlers
-@client.on(events.NewMessage(pattern=r'\.settarget'))
+@client.on(events.NewMessage(pattern=r'\.settarget(?:\s+(.+))?'))
 async def set_target_command(event):
     if not is_admin(event.sender_id):
         return
     
-    config['target_chat_id'] = event.chat_id
-    save_config()
-    await event.respond("✅ Target chat berhasil diatur ke chat ini!")
+    # If parameter is provided, try to use it as a username/link
+    if event.pattern_match.group(1):
+        input_text = event.pattern_match.group(1).strip()
+        
+        try:
+            # Try to join the group/channel if not already a member
+            try:
+                entity = await client.get_entity(input_text)
+                if hasattr(entity, 'username') and entity.username:
+                    try:
+                        await client(JoinChannelRequest(entity))
+                        await event.respond(f"✅ Berhasil bergabung dengan {entity.title}")
+                    except Exception as e:
+                        # Might already be a member, continue anyway
+                        pass
+            except Exception as e:
+                await event.respond(f"⚠️ Tidak dapat bergabung: {str(e)}")
+                return
+            
+            # Get entity after potentially joining
+            entity = await client.get_entity(input_text)
+            config['target_chat_id'] = entity.id
+            save_config()
+            await event.respond(f"✅ Target chat berhasil diatur ke '{entity.title}'!")
+            
+        except Exception as e:
+            await event.respond(f"❌ Error: {str(e)}")
+    
+    # If no parameter, use current chat (original behavior)
+    else:
+        config['target_chat_id'] = event.chat_id
+        save_config()
+        await event.respond("✅ Target chat berhasil diatur ke chat ini!")
 
-@client.on(events.NewMessage(pattern=r'\.addgrup'))
+@client.on(events.NewMessage(pattern=r'\.listtarget'))
+async def list_target_command(event):
+    if not is_admin(event.sender_id):
+        return
+    
+    if not config['target_chat_id']:
+        await event.respond("🎯 Belum ada target yang diatur. Gunakan .settarget untuk mengatur target.")
+        return
+    
+    try:
+        entity = await client.get_entity(int(config['target_chat_id']))
+        target_info = f"🎯 Target saat ini: {entity.title} (ID: {config['target_chat_id']})"
+    except Exception:
+        target_info = f"🎯 Target saat ini: ID: {config['target_chat_id']}"
+    
+    await event.respond(target_info)
+
+@client.on(events.NewMessage(pattern=r'\.cleartarget'))
+async def clear_target_command(event):
+    if not is_admin(event.sender_id):
+        return
+    
+    config['target_chat_id'] = None
+    save_config()
+    await event.respond("🎯 Target telah dihapus!")
+
+@client.on(events.NewMessage(pattern=r'\.addgrup(?:\s+(.+))?'))
 async def add_group_command(event):
     if not is_admin(event.sender_id):
         return
     
-    if event.is_group or event.is_channel:
+    # If parameter is provided, try to use it as a username/link
+    if event.pattern_match.group(1):
+        input_text = event.pattern_match.group(1).strip()
+        
+        try:
+            # Try to join the group/channel if not already a member
+            try:
+                entity = await client.get_entity(input_text)
+                if hasattr(entity, 'username') and entity.username:
+                    try:
+                        await client(JoinChannelRequest(entity))
+                        await event.respond(f"✅ Berhasil bergabung dengan {entity.title}")
+                    except Exception as e:
+                        # Might already be a member, continue anyway
+                        pass
+            except Exception as e:
+                await event.respond(f"⚠️ Tidak dapat bergabung: {str(e)}")
+                return
+            
+            # Get entity after potentially joining
+            entity = await client.get_entity(input_text)
+            group_id = entity.id
+            group_title = entity.title
+            
+            # Check if group is already in the list
+            if str(group_id) in [str(g) for g in config['group_list']]:
+                await event.respond(f"⚠️ Grup '{group_title}' sudah ada dalam daftar!")
+                return
+            
+            config['group_list'].append(str(group_id))
+            save_config()
+            await event.respond(f"✅ Grup '{group_title}' berhasil ditambahkan ke daftar!")
+            
+        except Exception as e:
+            await event.respond(f"❌ Error: {str(e)}")
+    
+    # If no parameter, use current chat (original behavior)
+    elif event.is_group or event.is_channel:
         group_id = event.chat_id
         group_title = event.chat.title
         
@@ -198,7 +291,7 @@ async def add_group_command(event):
         save_config()
         await event.respond(f"✅ Grup '{group_title}' berhasil ditambahkan ke daftar!")
     else:
-        await event.respond("❌ Perintah ini hanya dapat digunakan di dalam grup!")
+        await event.respond("❌ Berikan username/link grup atau gunakan perintah ini di dalam grup!")
 
 @client.on(events.NewMessage(pattern=r'\.listgrup'))
 async def list_group_command(event):
@@ -218,6 +311,28 @@ async def list_group_command(event):
             group_list_text += f"{i}. Unknown Group (ID: {group_id})\n"
     
     await event.respond(group_list_text)
+
+@client.on(events.NewMessage(pattern=r'\.rmgrup (\d+)'))
+async def remove_group_command(event):
+    if not is_admin(event.sender_id):
+        return
+    
+    try:
+        index = int(event.pattern_match.group(1))
+        if 1 <= index <= len(config['group_list']):
+            removed_group_id = config['group_list'].pop(index - 1)
+            save_config()
+            
+            try:
+                entity = await client.get_entity(int(removed_group_id))
+                group_title = entity.title
+                await event.respond(f"✅ Grup '{group_title}' berhasil dihapus dari daftar!")
+            except Exception:
+                await event.respond(f"✅ Grup dengan ID {removed_group_id} berhasil dihapus dari daftar!")
+        else:
+            await event.respond(f"❌ Indeks tidak valid! Gunakan angka 1-{len(config['group_list'])}.")
+    except ValueError:
+        await event.respond("❌ Format tidak valid! Gunakan .rmgrup [nomor]")
 
 @client.on(events.NewMessage(pattern=r'\.setdelay (\d+)'))
 async def set_delay_command(event):
@@ -307,9 +422,12 @@ async def help_command(event):
 📚 **Daftar Perintah Userbot**:
 
 🔹 **.setadmin** - Mengatur pengguna sebagai admin userbot
-🔹 **.settarget** - Mengatur grup target untuk mengirim pesan
-🔹 **.addgrup** - Menambahkan grup saat ini ke daftar grup sumber
+🔹 **.settarget [username/link]** - Mengatur grup target untuk mengirim pesan
+🔹 **.listtarget** - Menampilkan target yang diatur saat ini
+🔹 **.cleartarget** - Menghapus pengaturan target
+🔹 **.addgrup [username/link]** - Menambahkan grup ke daftar grup sumber
 🔹 **.listgrup** - Menampilkan daftar grup sumber
+🔹 **.rmgrup [nomor]** - Menghapus grup dari daftar berdasarkan nomor urut
 🔹 **.setdelay [detik]** - Mengatur delay antar pengiriman pesan
 🔹 **.mulai** - Memulai proses pengiriman pesan
 🔹 **.stop** - Menghentikan proses pengiriman pesan
@@ -320,6 +438,7 @@ async def help_command(event):
 - Semua pengaturan harus diatur sebelum memulai userbot
 - Delay minimum adalah 30 detik
 - Userbot hanya akan merespon perintah dari admin
+- Anda dapat menggunakan username atau link untuk menambahkan grup/channel
 """
     await event.respond(help_text)
 
