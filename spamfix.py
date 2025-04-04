@@ -127,8 +127,10 @@ async def forward_random_message():
         
         source_group = random.choice(config['group_list'])
         
-        # Get the last 50 messages from the source group
-        messages = []
+        # Get the last 100 messages from the source group
+        media_messages = []
+        text_messages = []
+        
         try:
             source_entity = await safe_get_entity(source_group)
             if not source_entity:
@@ -138,9 +140,12 @@ async def forward_random_message():
                     loop.create_task(schedule_next_forward())
                 return
             
-            async for message in client.iter_messages(source_entity, limit=50):
-                if message.media or message.text:  # Only consider messages with media or text
-                    messages.append(message)
+            # Get messages and separate them into media and text
+            async for message in client.iter_messages(source_entity, limit=30):
+                if message.media:
+                    media_messages.append(message)
+                elif message.text:
+                    text_messages.append(message)
         except Exception as e:
             await safe_send_message(config['admin_id'], f"❌ Error mengakses grup sumber: {str(e)}")
             if config['is_running']:
@@ -148,15 +153,21 @@ async def forward_random_message():
                 loop.create_task(schedule_next_forward())
             return
         
-        if not messages:
+        # Prioritize media messages, then fall back to text if none found
+        if media_messages:
+            # Sort media messages by date, newest first
+            media_messages.sort(key=lambda msg: msg.date, reverse=True)
+            # Take one of the 10 most recent media messages (or all if less than 10)
+            top_recent = media_messages[:min(10, len(media_messages))]
+            chosen_message = random.choice(top_recent)
+        elif text_messages:
+            chosen_message = random.choice(text_messages)
+        else:
             await safe_send_message(config['admin_id'], f"⚠️ Tidak menemukan pesan yang dapat diteruskan dari: {source_group}")
             if config['is_running']:
                 loop = asyncio.get_event_loop()
                 loop.create_task(schedule_next_forward())
             return
-        
-        # Choose a random message
-        chosen_message = random.choice(messages)
         
         # Get target entity
         target_entity = await safe_get_entity(config['target_chat_id'])
